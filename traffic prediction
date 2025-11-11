@@ -1,0 +1,480 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+# کتابخانه‌های یادگیری ماشین
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.impute import SimpleImputer
+
+# کتابخانه‌های سری زمانی
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.seasonal import seasonal_decompose
+import xgboost as xgb
+
+class TrafficPredictor:
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
+        self.label_encoders = {}
+        self.feature_importance = {}
+        self.best_model = None
+        
+    def generate_sample_data(self, n_samples=10000):
+        """تولید داده‌های نمونه برای نمایش"""
+        np.random.seed(42)
+        
+        # تاریخ‌های تصادفی در ۶ ماه گذشته
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=180)
+        
+        dates = []
+        traffic_levels = []
+        hours = []
+        days = []
+        months = []
+        day_of_week = []
+        is_weekend = []
+        is_holiday = []
+        weather_conditions = []
+        temperature = []
+        precipitation = []
+        location_ids = []
+        vehicle_count = []
+        avg_speed = []
+        congestion_level = []
+        
+        locations = ['highway_north', 'highway_south', 'downtown', 'suburban', 'commercial']
+        weather_types = ['clear', 'cloudy', 'rainy', 'snowy']
+        
+        for i in range(n_samples):
+            current_date = start_date + timedelta(days=np.random.randint(0, 180),
+                                                 hours=np.random.randint(0, 24))
+            dates.append(current_date)
+            
+            hour = current_date.hour
+            hours.append(hour)
+            days.append(current_date.day)
+            months.append(current_date.month)
+            day_of_week.append(current_date.weekday())
+            is_weekend.append(1 if current_date.weekday() >= 5 else 0)
+            is_holiday.append(1 if np.random.random() < 0.05 else 0)  # 5% احتمال تعطیل بودن
+            
+            location = np.random.choice(locations)
+            location_ids.append(location)
+            
+            weather = np.random.choice(weather_types, p=[0.6, 0.25, 0.1, 0.05])
+            weather_conditions.append(weather)
+            
+            # دما بر اساس فصل
+            if months[-1] in [12, 1, 2]:  # زمستان
+                temp = np.random.normal(5, 5)
+            elif months[-1] in [3, 4, 5]:  # بهار
+                temp = np.random.normal(15, 5)
+            elif months[-1] in [6, 7, 8]:  # تابستان
+                temp = np.random.normal(25, 5)
+            else:  # پاییز
+                temp = np.random.normal(15, 5)
+            temperature.append(max(-10, min(40, temp)))
+            
+            # بارش بر اساس وضعیت آب و هوا
+            if weather == 'rainy':
+                precip = np.random.exponential(5)
+            elif weather == 'snowy':
+                precip = np.random.exponential(3)
+            else:
+                precip = np.random.exponential(0.5)
+            precipitation.append(min(50, precip))
+            
+            # تعداد وسایل نقلیه با الگوهای زمانی
+            base_vehicles = 1000
+            # الگوهای ساعات اوج ترافیک
+            if 7 <= hour <= 9 or 16 <= hour <= 18:  # ساعت‌های شلوغ
+                time_factor = 2.5
+            elif 12 <= hour <= 13:  # ساعت ناهار
+                time_factor = 1.5
+            elif 0 <= hour <= 5:  # شب
+                time_factor = 0.3
+            else:
+                time_factor = 1.0
+            
+            # تأثیر روزهای هفته
+            if day_of_week[-1] >= 5:  # آخر هفته
+                day_factor = 0.7
+            else:
+                day_factor = 1.2
+            
+            # تأثیر آب و هوا
+            if weather == 'rainy':
+                weather_factor = 0.8
+            elif weather == 'snowy':
+                weather_factor = 0.5
+            else:
+                weather_factor = 1.0
+            
+            vehicle_count_val = int(base_vehicles * time_factor * day_factor * weather_factor * 
+                                   np.random.uniform(0.8, 1.2))
+            vehicle_count.append(vehicle_count_val)
+            
+            # سرعت متوسط
+            if vehicle_count_val > 2000:
+                speed = np.random.normal(30, 10)
+            elif vehicle_count_val > 1500:
+                speed = np.random.normal(50, 15)
+            else:
+                speed = np.random.normal(70, 20)
+                
+            # تأثیر آب و هوا بر سرعت
+            if weather == 'rainy':
+                speed *= 0.8
+            elif weather == 'snowy':
+                speed *= 0.6
+                
+            avg_speed.append(max(5, min(120, speed)))
+            
+            # سطح ترافیک (متغیر هدف)
+            if avg_speed[-1] < 20:
+                traffic_level = 'heavy'
+            elif avg_speed[-1] < 40:
+                traffic_level = 'moderate'
+            else:
+                traffic_level = 'light'
+            congestion_level.append(traffic_level)
+            
+            # سطح ترافیک عددی برای رگرسیون
+            if traffic_level == 'heavy':
+                traffic_levels.append(3)
+            elif traffic_level == 'moderate':
+                traffic_levels.append(2)
+            else:
+                traffic_levels.append(1)
+        
+        # ایجاد دیتافریم
+        data = pd.DataFrame({
+            'datetime': dates,
+            'hour': hours,
+            'day': days,
+            'month': months,
+            'day_of_week': day_of_week,
+            'is_weekend': is_weekend,
+            'is_holiday': is_holiday,
+            'location': location_ids,
+            'weather': weather_conditions,
+            'temperature': temperature,
+            'precipitation': precipitation,
+            'vehicle_count': vehicle_count,
+            'avg_speed': avg_speed,
+            'congestion_level': congestion_level,
+            'traffic_level': traffic_levels
+        })
+        
+        return data
+    
+    def preprocess_data(self, data):
+        """پیش‌پردازش داده‌ها"""
+        df = data.copy()
+        
+        # استخراج ویژگی‌های زمانی
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df['year'] = df['datetime'].dt.year
+        df['day_of_year'] = df['datetime'].dt.dayofyear
+        df['week_of_year'] = df['datetime'].dt.isocalendar().week
+        
+        # کدگذاری متغیرهای категоوری
+        categorical_cols = ['location', 'weather', 'congestion_level']
+        for col in categorical_cols:
+            if col not in self.label_encoders:
+                self.label_encoders[col] = LabelEncoder()
+            df[col] = self.label_encoders[col].fit_transform(df[col])
+        
+        # انتخاب ویژگی‌ها
+        feature_cols = ['hour', 'day', 'month', 'day_of_week', 'is_weekend', 'is_holiday',
+                       'location', 'weather', 'temperature', 'precipitation', 'vehicle_count',
+                       'year', 'day_of_year', 'week_of_year']
+        
+        X = df[feature_cols]
+        y = df['traffic_level']
+        
+        # مقیاس‌بندی ویژگی‌ها
+        if 'feature' not in self.scalers:
+            self.scalers['feature'] = StandardScaler()
+            X_scaled = self.scalers['feature'].fit_transform(X)
+        else:
+            X_scaled = self.scalers['feature'].transform(X)
+        
+        return X_scaled, y, feature_cols
+    
+    def train_models(self, X, y, feature_names):
+        """آموزش مدل‌های مختلف"""
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, shuffle=True
+        )
+        
+        # تعریف مدل‌ها
+        models = {
+            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
+            'Linear Regression': LinearRegression(),
+            'SVR': SVR(kernel='rbf', C=1.0),
+            'XGBoost': xgb.XGBRegressor(n_estimators=100, random_state=42),
+            'Neural Network': MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=1000, random_state=42)
+        }
+        
+        results = {}
+        
+        for name, model in models.items():
+            print(f"Training {name}...")
+            model.fit(X_train, y_train)
+            self.models[name] = model
+            
+            # پیش‌بینی و ارزیابی
+            y_pred = model.predict(X_test)
+            
+            mae = mean_absolute_error(y_test, y_pred)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            r2 = r2_score(y_test, y_pred)
+            
+            results[name] = {
+                'model': model,
+                'mae': mae,
+                'mse': mse,
+                'rmse': rmse,
+                'r2': r2
+            }
+            
+            print(f"{name} - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
+            
+            # محاسبه اهمیت ویژگی‌ها (در صورت موجود بودن)
+            if hasattr(model, 'feature_importances_'):
+                self.feature_importance[name] = {
+                    'features': feature_names,
+                    'importance': model.feature_importances_
+                }
+        
+        # انتخاب بهترین مدل بر اساس R²
+        best_model_name = max(results, key=lambda x: results[x]['r2'])
+        self.best_model = results[best_model_name]['model']
+        print(f"\nBest Model: {best_model_name} with R²: {results[best_model_name]['r2']:.4f}")
+        
+        return results
+    
+    def predict_traffic(self, input_features):
+        """پیش‌بینی ترافیک برای داده‌های جدید"""
+        if self.best_model is None:
+            raise ValueError("مدل هنوز آموزش ندیده است. لطفاً ابتدا مدل را آموزش دهید.")
+        
+        # پیش‌پردازش ویژگی‌های ورودی
+        input_df = pd.DataFrame([input_features])
+        
+        # کدگذاری متغیرهای دستی
+        if 'location' in input_features and 'location' in self.label_encoders:
+            input_df['location'] = self.label_encoders['location'].transform([input_features['location']])[0]
+        if 'weather' in input_features and 'weather' in self.label_encoders:
+            input_df['weather'] = self.label_encoders['weather'].transform([input_features['weather']])[0]
+        
+        # اطمینان از وجود تمام ستون‌های مورد نیاز
+        required_cols = ['hour', 'day', 'month', 'day_of_week', 'is_weekend', 'is_holiday',
+                        'location', 'weather', 'temperature', 'precipitation', 'vehicle_count',
+                        'year', 'day_of_year', 'week_of_year']
+        
+        for col in required_cols:
+            if col not in input_df.columns:
+                if col in input_features:
+                    input_df[col] = input_features[col]
+                else:
+                    # مقدار پیش‌فرض
+                    if col in ['hour', 'day', 'month']:
+                        input_df[col] = datetime.now().__getattribute__(col)
+                    elif col == 'day_of_week':
+                        input_df[col] = datetime.now().weekday()
+                    elif col == 'is_weekend':
+                        input_df[col] = 1 if datetime.now().weekday() >= 5 else 0
+                    else:
+                        input_df[col] = 0
+        
+        # مرتب‌سازی ستون‌ها
+        input_df = input_df[required_cols]
+        
+        # مقیاس‌بندی
+        X_scaled = self.scalers['feature'].transform(input_df)
+        
+        # پیش‌بینی
+        prediction = self.best_model.predict(X_scaled)[0]
+        
+        # تبدیل به سطح ترافیک
+        if prediction >= 2.5:
+            traffic_level = "سنگین"
+            color = "red"
+            suggestion = "از مسیرهای جایگزین استفاده کنید یا سفر خود را به زمان دیگری موکول کنید."
+        elif prediction >= 1.5:
+            traffic_level = "متوسط"
+            color = "orange"
+            suggestion = "زمان سفر کمی بیشتر از حد معمول خواهد بود."
+        else:
+            traffic_level = "سبک"
+            color = "green"
+            suggestion = "شرایط ترافیک مطلوب است."
+        
+        return {
+            'predicted_value': round(prediction, 2),
+            'traffic_level': traffic_level,
+            'color': color,
+            'suggestion': suggestion
+        }
+    
+    def plot_feature_importance(self, model_name='Random Forest'):
+        """نمایش اهمیت ویژگی‌ها"""
+        if model_name not in self.feature_importance:
+            print(f"اهمیت ویژگی‌ها برای مدل {model_name} در دسترس نیست.")
+            return
+        
+        importance_data = self.feature_importance[model_name]
+        features = importance_data['features']
+        importance = importance_data['importance']
+        
+        # ایجاد دیتافریم برای نمودار
+        imp_df = pd.DataFrame({
+            'feature': features,
+            'importance': importance
+        }).sort_values('importance', ascending=True)
+        
+        plt.figure(figsize=(10, 8))
+        plt.barh(imp_df['feature'], imp_df['importance'])
+        plt.xlabel('اهمیت')
+        plt.title(f'اهمیت ویژگی‌ها - مدل {model_name}')
+        plt.tight_layout()
+        plt.show()
+    
+    def time_series_analysis(self, data, location='downtown'):
+        """تحلیل سری زمانی برای یک مکان خاص"""
+        location_data = data[data['location'] == location].copy()
+        location_data = location_data.sort_values('datetime')
+        location_data.set_index('datetime', inplace=True)
+        
+        # نمونه‌برداری روزانه
+        daily_traffic = location_data['traffic_level'].resample('D').mean()
+        
+        plt.figure(figsize=(15, 10))
+        
+        # نمودار سری زمانی
+        plt.subplot(3, 1, 1)
+        plt.plot(daily_traffic.index, daily_traffic.values)
+        plt.title(f'سطح ترافیک روزانه - {location}')
+        plt.ylabel('سطح ترافیک')
+        plt.grid(True)
+        
+        # تجزیه سری زمانی
+        if len(daily_traffic) > 30:
+            decomposition = seasonal_decompose(daily_traffic.fillna(method='ffill'), model='additive', period=7)
+            
+            plt.subplot(3, 1, 2)
+            plt.plot(decomposition.trend.index, decomposition.trend.values)
+            plt.title('روند')
+            plt.grid(True)
+            
+            plt.subplot(3, 1, 3)
+            plt.plot(decomposition.seasonal.index, decomposition.seasonal.values)
+            plt.title('فصلی بودن')
+            plt.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return daily_traffic
+
+def main():
+    """تابع اصلی برای اجرای کامل سیستم پیش‌بینی ترافیک"""
+    print("🚦 سیستم پیش‌بینی ترافیک - راه اندازی...")
+    
+    # ایجاد نمونه از کلاس پیش‌بینی
+    predictor = TrafficPredictor()
+    
+    # تولید داده‌های نمونه
+    print("📊 در حال تولید داده‌های نمونه...")
+    traffic_data = predictor.generate_sample_data(10000)
+    print(f"داده‌های تولید شده: {len(traffic_data)} نمونه")
+    
+    # نمایش اطلاعات اولیه داده‌ها
+    print("\n📈 اطلاعات کلی داده‌ها:")
+    print(traffic_data.head())
+    print(f"\nتوزیع سطح ترافیک:\n{traffic_data['congestion_level'].value_counts()}")
+    
+    # پیش‌پردازش داده‌ها
+    print("\n🔧 در حال پیش‌پردازش داده‌ها...")
+    X, y, feature_names = predictor.preprocess_data(traffic_data)
+    
+    # آموزش مدل‌ها
+    print("\n🤖 در حال آموزش مدل‌های یادگیری ماشین...")
+    results = predictor.train_models(X, y, feature_names)
+    
+    # نمایش اهمیت ویژگی‌ها
+    print("\n📊 نمایش اهمیت ویژگی‌ها...")
+    predictor.plot_feature_importance('Random Forest')
+    
+    # تحلیل سری زمانی
+    print("\n⏰ در حال تحلیل سری زمانی...")
+    predictor.time_series_analysis(traffic_data, 'downtown')
+    
+    # تست پیش‌بینی با داده‌های جدید
+    print("\n🔮 تست پیش‌بینی ترافیک...")
+    
+    # نمونه‌ای از داده‌های ورودی برای پیش‌بینی
+    test_input = {
+        'hour': 17,  # ساعت 5 عصر
+        'day': datetime.now().day,
+        'month': datetime.now().month,
+        'day_of_week': datetime.now().weekday(),
+        'is_weekend': 0,
+        'is_holiday': 0,
+        'location': 'downtown',
+        'weather': 'clear',
+        'temperature': 22,
+        'precipitation': 0,
+        'vehicle_count': 1800,
+        'year': datetime.now().year,
+        'day_of_year': datetime.now().timetuple().tm_yday,
+        'week_of_year': datetime.now().isocalendar()[1]
+    }
+    
+    prediction = predictor.predict_traffic(test_input)
+    
+    print(f"\nنتایج پیش‌بینی ترافیک:")
+    print(f"مقدار پیش‌بینی شده: {prediction['predicted_value']}")
+    print(f"سطح ترافیک: {prediction['traffic_level']}")
+    print(f"پیشنهاد: {prediction['suggestion']}")
+    
+    # مقایسه مدل‌ها
+    print("\n🏆 مقایسه عملکرد مدل‌ها:")
+    comparison_df = pd.DataFrame.from_dict(results, orient='index')[['mae', 'rmse', 'r2']]
+    print(comparison_df.round(4))
+    
+    # نمایش نمودار مقایسه مدل‌ها
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(1, 2, 1)
+    comparison_df['r2'].plot(kind='bar', color='skyblue')
+    plt.title('مقایسه R² مدل‌ها')
+    plt.ylabel('R² Score')
+    plt.xticks(rotation=45)
+    
+    plt.subplot(1, 2, 2)
+    comparison_df['rmse'].plot(kind='bar', color='lightcoral')
+    plt.title('مقایسه RMSE مدل‌ها')
+    plt.ylabel('RMSE')
+    plt.xticks(rotation=45)
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
